@@ -19,22 +19,53 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
+#include <string.h>
 
 #include <string>
 #include <vector>
 #include <list>
+#include <utility>
+using std::swap;
 
+#define GLM_FORCE_RADIANS
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 
+#include "gl_core_3_3.h"
 #include "SDL2/SDL.h"
 #include "SDL2/SDL_opengl.h"
-#include "glew.h"
 
 namespace {
 
+constexpr float
+    ball_radius = 0.4f,
+    ball_core_radius_ratio = 0.707f,
+    min_x = -12.0f,
+    max_x = +12.0f,
+    min_y = 0.0f,
+    max_y = 1e+30f,
+    min_z = -12.0f,
+    max_z = +12.0f,
+    ticks_per_second = 600.0f,
+    gravity = 4.0f,
+    fovy_radians = 1.0f,
+    near_plane = 0.1f,
+    far_plane = 40.0f;
+
+constexpr int
+    plus_x_index = 0,
+    minus_x_index = 1,
+    plus_y_index = 2,
+    minus_y_index = 3,
+    plus_z_index = 4,
+    minus_z_index = 5;
+
+int screen_x = 1280, screen_y = 960;
+SDL_Window* window = nullptr;
+std::string argv0;
+
 static void panic(const char* message, const char* reason) {
-    fprintf(stderr, "JellyMcJelloFace: %s %s\n", message, reason);
+        fprintf(stderr, "%s: %s %s\n", argv0.c_str(), message, reason);
     fflush(stderr);
     fflush(stdout);
     SDL_ShowSimpleMessageBox(
@@ -68,6 +99,10 @@ static GLuint make_program(const char* vs_code, const char* fs_code) {
     glCompileShader(vs_id);
     glCompileShader(fs_id);
     
+    printf("%i %i\n", (int)vs_id, (int)fs_id);
+    
+    PANIC_IF_GL_ERROR;
+    
     GLint okay = 0;
     GLsizei length = 0;
     const GLuint shader_id_array[2] = { vs_id, fs_id };
@@ -92,26 +127,6 @@ static GLuint make_program(const char* vs_code, const char* fs_code) {
     PANIC_IF_GL_ERROR;
     return program_id;
 }
-
-constexpr float
-    ball_radius = 0.4f,
-    ball_core_radius_ratio = 0.707f,
-    min_x = -12.0f,
-    max_x = +12.0f,
-    min_y = 0.0f,
-    max_y = 1e+30f,
-    min_z = -12.0f,
-    max_z = +12.0f,
-    ticks_per_second = 600.0f,
-    gravity = 4.0f;
-
-constexpr int
-    plus_x_index = 0,
-    minus_x_index = 1,
-    plus_y_index = 2,
-    minus_y_index = 3,
-    plus_z_index = 4,
-    minus_z_index = 5;
 
 // To do reflections on each ball, we will associate a framebuffer
 // object and six 2d texture faces (+/- xyz) to each ball in the
@@ -146,13 +161,13 @@ class Ball {
         radius = radius;
         
         if (!recycled_ball_render.empty()) {
-            render = *recycled_ball_render.back();
-            recycled_ball_render.pop();
+            render = recycled_ball_render.back();
+            recycled_ball_render.pop_back();
         } else {
-            PANIC_IF_OPENGL_ERROR;
+            PANIC_IF_GL_ERROR;
             glGenFramebuffers(6, render.framebuffers);
             glGenTextures(1, &render.cubemap);
-            PANIC_IF_OPENGL_ERROR;
+            PANIC_IF_GL_ERROR;
         }
     }
     
@@ -170,16 +185,17 @@ class Ball {
     //
     // Sets the bounce flag of both balls to true if we bounced.
     bool bounce_ball(Ball* other_ball_ptr) {
-        Ball& other_ball = *other_ball_ptr;
-        glm::vec3 displacement = other_ball.position - position;
+        // This isn't right physics.
+        Ball& other = *other_ball_ptr;
+        glm::vec3 displacement = other.position - position;
         float squared_distance = dot(displacement, displacement);
-        float squared_radii = (radius + other_ball.radius)
-                            * (radius + other_ball.radius);
+        float squared_radii = (radius + other.radius)
+                            * (radius + other.radius);
         
         bool collision_course = dot(displacement, velocity-other.velocity) > 0;
         
         if (collision_course && squared_distance < squared_radii) {
-            swap(velocity, other_ball.velocity);
+            swap(velocity, other.velocity);
             bounced = true;
             other.bounced = true;
             return true;
@@ -250,43 +266,56 @@ class Ball {
     ) {
         static bool buffers_initialized = false;
         static GLuint vertex_buffer_id;
-        static GLuint element_buffer_id;
-        static int element_count;
+        static int vertex_count;
         
         // Initialize a vertex buffer with vertices of sphere with
-        // radius 1 and an element buffer with indicies suitable for
-        // drawing a sphere using the earlier vertex buffer and
-        // GL_TRIANGLES draw mode.
+        // radius 1 suitable for use with GL_TRIANGLES draw mode.
         if (!buffers_initialized) {
-            const int W = 36, H = 18;
             std::vector<glm::vec3> coord_vector;
-            std::vector<uint16_t> element_vector;
             
-            // Axis is along y-axis; phi is angle above xz-plane,
-            // theta is angle around y-axis.
-            for (int h = 1; h < H; ++h) {
-                float phi = (M_PI/H)*h - M_PI/2;
-                float cos_phi = cosf(phi);
-                float sin_phi = sinf(phi);
-                
-                for (int w = 0; w < W; ++w) {
-                    float theta = (2*M_PI/W)*w;
-                    float cos_theta = cosf(theta);
-                    float sin_theta = sinf(theta);
-                    
-                    coord_vector.emplace_back(
-                        cos_theta*cos_phi, sin_phi, sin_theta*cos_phi
-                    );
+            const float magic = 3;
+            
+            auto add_face = [&coord_vector, magic]
+            (glm::vec3 a_vec, glm::vec3 b_vec, glm::vec3 face_vec) {
+                for (float a = -magic; a < magic; ++a) {
+                    for (float b = -magic; b < magic; ++b) {
+                        glm::vec3 coord0 = a*a_vec + b*b_vec + face_vec;
+                        coord0 = normalize(coord0);
+                        glm::vec3 coord1 = (a+1)*a_vec + b*b_vec + face_vec;
+                        coord1 = normalize(coord1);
+                        glm::vec3 coord2 = a*a_vec + (b+1)*b_vec + face_vec;
+                        coord2 = normalize(coord2);
+                        glm::vec3 coord3 = (a+1)*a_vec + (b+1)*b_vec + face_vec;
+                        coord3 = normalize(coord3);
+                        
+                        coord_vector.push_back(coord0);
+                        coord_vector.push_back(coord1);
+                        coord_vector.push_back(coord3);
+                        coord_vector.push_back(coord0);
+                        coord_vector.push_back(coord3);
+                        coord_vector.push_back(coord2);
+                    }
                 }
-                
-                int top_element = int(coord_vector.size());
-                coord_vector.emplace_back(0, 1, 0);
-                int bottom_element = int(coord_vector.size());
-                coord_vector.emplace_back(0, -1, 0);
-                
-                
-            }
+            };
             
+            add_face( {0,1,0}, {0,0,1}, {+magic,0,0} ); // +x face
+            add_face( {0,0,1}, {0,1,0}, {-magic,0,0} ); // -x face
+            add_face( {0,0,1}, {1,0,0}, {0,+magic,0} ); // +y face
+            add_face( {1,0,0}, {0,0,1}, {0,-magic,0} ); // -y face
+            add_face( {1,0,0}, {0,1,0}, {0,0,+magic} ); // +z face
+            add_face( {0,1,0}, {1,0,0}, {0,0,-magic} ); // -z face
+            
+            vertex_count = int(coord_vector.size());
+            
+            PANIC_IF_GL_ERROR;
+            glGenBuffers(1, &vertex_buffer_id);
+            glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id);
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                3 * sizeof(float) * coord_vector.size(),
+                coord_vector.data(),
+                GL_STATIC_DRAW
+            );
             buffers_initialized = true;
         }
         
@@ -299,11 +328,11 @@ class Ball {
         static GLint color_idx0;
         static GLint sphere_origin_idx0;
         static GLint radius_idx0;
-        static GLint sphere_coord_idx0;
+        static GLint sphere_coord_idx0 = 0;
         
         static const char vs0_source[] =
             "#version 330\n"
-            
+            "precision mediump float;\n"
             "uniform mat4 view_matrix;\n"
             "uniform mat4 proj_matrix;\n"
             "uniform vec3 color;\n"
@@ -317,14 +346,15 @@ class Ball {
             "void main() {\n"
                 "vec4 coord = vec4(radius*sphere_coord + sphere_origin, 1.0);\n"
                 "gl_Position = proj_matrix * view_matrix * coord;\n"
-                "varying_color = color;\n"
+                "varying_color = vec4(color, 1.0);\n"
             "}\n"
         ;
         static const char fs0_source[] =
             "#version 330\n"
+            "precision mediump float;\n"
             "in vec4 varying_color;\n"
             "layout(location=0) out vec4 fragment_color;\n"
-            "void main() { fragment_color = varying_color;\n"
+            "void main() { fragment_color = varying_color; }\n"
         ;
         if (!initialized0) {
             PANIC_IF_GL_ERROR;
@@ -336,14 +366,199 @@ class Ball {
             
             view_matrix_idx0 = glGetUniformLocation(program0_id, "view_matrix");
             proj_matrix_idx0 = glGetUniformLocation(program0_id, "proj_matrix");
+            color_idx0 = glGetUniformLocation(program0_id, "color");
+            sphere_origin_idx0 = glGetUniformLocation(program0_id, "sphere_origin");
+            radius_idx0 = glGetUniformLocation(program0_id, "radius");
+            
+            glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id);
+            
+            glVertexAttribPointer(
+                sphere_coord_idx0,
+                3,
+                GL_FLOAT,
+                false,
+                3*sizeof(float),
+                (void*)0
+            );
+            glEnableVertexAttribArray(sphere_coord_idx0);
+            PANIC_IF_GL_ERROR;
             
             initialized0 = true;
         }
+        
+        glUseProgram(program0_id);
+        glBindVertexArray(vao0);
+        
+        glUniformMatrix4fv(view_matrix_idx0, 1, false, &view_matrix[0][0]);
+        glUniformMatrix4fv(proj_matrix_idx0, 1, false, &proj_matrix[0][0]);
+        
+        for (Ball const& ball : list) {
+            if (&ball == skip) continue;
+            glUniform3f(color_idx0, ball.r, ball.g, ball.b);
+            glUniform3fv(sphere_origin_idx0, 1, &ball.position[0]);
+            glUniform1f(radius_idx0, ball.radius);
+            
+            printf("%i\n", (int)vertex_count);
+            glDrawArrays(GL_TRIANGLES, 0, vertex_count);
+        }
+        
+        glBindVertexArray(0);
     }
 };
 
+std::vector<BallRender> Ball::recycled_ball_render;
+
+static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
+    glm::mat4& view = *view_ptr;
+    glm::mat4& projection = *proj_ptr;
+    static bool w, a, s, d, q, e, space;
+    static float theta = 1.5707f, phi = 1.8f, radius = 2.0f;
+    static float mouse_x, mouse_y;
+    static glm::vec3 eye;
+    
+    bool no_quit = true;
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        switch (event.type) {
+          default:
+          break; case SDL_KEYDOWN:
+            switch (event.key.keysym.scancode) {
+              default:
+              break; case SDL_SCANCODE_W: case SDL_SCANCODE_I: w = true;
+              break; case SDL_SCANCODE_A: case SDL_SCANCODE_J: a = true;
+              break; case SDL_SCANCODE_S: case SDL_SCANCODE_K: s = true;
+              break; case SDL_SCANCODE_D: case SDL_SCANCODE_L: d = true;
+              break; case SDL_SCANCODE_Q: case SDL_SCANCODE_U: q = true;
+              break; case SDL_SCANCODE_E: case SDL_SCANCODE_O: e = true;
+              break; case SDL_SCANCODE_SPACE:  space = true;
+              }
+            
+          break; case SDL_KEYUP:
+            switch (event.key.keysym.scancode) {
+              default:
+              break; case SDL_SCANCODE_W: case SDL_SCANCODE_I: w = false;
+              break; case SDL_SCANCODE_A: case SDL_SCANCODE_J: a = false;
+              break; case SDL_SCANCODE_S: case SDL_SCANCODE_K: s = false;
+              break; case SDL_SCANCODE_D: case SDL_SCANCODE_L: d = false;
+              break; case SDL_SCANCODE_Q: case SDL_SCANCODE_U: q = false;
+              break; case SDL_SCANCODE_E: case SDL_SCANCODE_O: e = false;
+              break; case SDL_SCANCODE_SPACE: space = false;
+            }
+          break; case SDL_MOUSEWHEEL:
+            phi -= event.wheel.y * 0.04f;
+            theta -= event.wheel.x * 0.04f;
+          break; case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
+            mouse_x = event.button.x;
+            mouse_y = event.button.y;
+          break; case SDL_MOUSEMOTION:
+            mouse_x = event.motion.x;
+            mouse_y = event.motion.y;
+          break; case SDL_WINDOWEVENT:
+            if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                event.window.event == SDL_WINDOWEVENT_RESIZED) {
+                
+                screen_x = event.window.data1;
+                screen_y = event.window.data2;
+            }
+          break; case SDL_QUIT:
+            no_quit = false;
+        }
+    }
+    
+    glm::vec3 forward_normal_vector(
+        sinf(phi) * cosf(theta),
+        cosf(phi),
+        sinf(phi) * sinf(theta)
+    );
+    
+    // Free-camera mode.
+    auto right_vector = glm::cross(forward_normal_vector, glm::vec3(0,1,0));
+    right_vector = glm::normalize(right_vector);
+    auto up_vector = glm::cross(right_vector, forward_normal_vector);
+    
+    eye += 5e-2f * right_vector * (float)(d - a);
+    eye += 5e-2f * forward_normal_vector * (float)(w - s);
+    eye += 5e-2f * up_vector * (float)(e - q);
+    
+    if (space) {
+        theta += 1e-4 * (mouse_x - screen_x*0.5f);
+        phi +=   1e-4 * (mouse_y - screen_y*0.5f);
+    }
+    
+    view = glm::lookAt(eye, eye+forward_normal_vector, glm::vec3(0,1,0));
+    
+    printf("%f %f %f : %f %f %f\n", eye[0], eye[1], eye[2], forward_normal_vector[0], forward_normal_vector[1], forward_normal_vector[2]);
+    
+    projection = glm::perspective(
+        fovy_radians,
+        float(screen_x)/screen_y,
+        near_plane,
+        far_plane
+    );
+    
+    float y_plane_radius = tanf(fovy_radians / 2.0f);
+    float x_plane_radius = y_plane_radius * screen_x / screen_y;
+    float mouse_vcs_x = x_plane_radius * (2.0f * mouse_x / screen_x - 1.0f);
+    float mouse_vcs_y = y_plane_radius * (1.0f - 2.0f * mouse_y / screen_y);
+    glm::vec4 mouse_vcs(mouse_vcs_x, mouse_vcs_y, -1.0f, 1.0f);
+    glm::vec4 mouse_wcs = glm::inverse(view) * mouse_vcs;
+    
+    return no_quit;
+}
+
+int Main(int, char** argv) {
+    argv0 = argv[0];
+    
+    window = SDL_CreateWindow(
+        "Bouncy",
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        screen_x, screen_y,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE
+    );
+    if (window == nullptr) {
+        panic("Could not initialize window", SDL_GetError());
+    }
+    auto context = SDL_GL_CreateContext(window);
+    if (context == nullptr) {
+        panic("Could not create OpenGL context", SDL_GetError());
+    }
+    if (SDL_GL_MakeCurrent(window, context) < 0) {
+        panic("SDL OpenGL context error", SDL_GetError());
+    }
+    
+    ogl_LoadFunctions();
+    
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+    glEnable(GL_DEPTH_TEST);
+    glClearColor(0, 1, 1, 1);
+    
+    bool no_quit = true;
+    uint32_t last_fps_print_time = 0;
+    
+    glm::mat4 view_matrix, proj_matrix;
+    BallList list;
+    
+    list.emplace_back(glm::vec3(0,0,3), glm::vec3(0,20,0), 1, 0, 1, 0.5);
+        
+    while (no_quit) {
+        no_quit = handle_controls(&view_matrix, &proj_matrix);
+        
+        glViewport(0, 0, screen_x, screen_y);
+        
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        Ball::draw_list(view_matrix, proj_matrix, list);
+        
+        SDL_GL_SwapWindow(window);
+        PANIC_IF_GL_ERROR;
+    }
+    
+    return 0;
+}
+
 } // end anonymous namespace
 
-int main() {
-    
+int main(int argc, char** argv) {
+    return Main(argc, argv);
 }
