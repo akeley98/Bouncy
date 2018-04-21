@@ -49,8 +49,8 @@ constexpr float
     ticks_per_second = 600.0f,
     gravity = 4.0f,
     fovy_radians = 1.0f,
-    near_plane = 0.1f,
-    far_plane = 40.0f;
+    near_plane = 0.5f,
+    far_plane = 350.0f;
 
 constexpr int
     plus_x_index = 0,
@@ -58,14 +58,24 @@ constexpr int
     plus_y_index = 2,
     minus_y_index = 3,
     plus_z_index = 4,
-    minus_z_index = 5;
+    minus_z_index = 5,
+    ball_cubemap_dim = 256;
+
+GLenum cubemap_face_enums[] = {
+    GL_TEXTURE_CUBE_MAP_POSITIVE_X,
+    GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+    GL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+    GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+    GL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+    GL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
+};
 
 int screen_x = 1280, screen_y = 960;
 SDL_Window* window = nullptr;
 std::string argv0;
 
 static void panic(const char* message, const char* reason) {
-        fprintf(stderr, "%s: %s %s\n", argv0.c_str(), message, reason);
+    fprintf(stderr, "%s: %s %s\n", argv0.c_str(), message, reason);
     fflush(stderr);
     fflush(stdout);
     SDL_ShowSimpleMessageBox(
@@ -98,8 +108,6 @@ static GLuint make_program(const char* vs_code, const char* fs_code) {
     
     glCompileShader(vs_id);
     glCompileShader(fs_id);
-    
-    printf("%i %i\n", (int)vs_id, (int)fs_id);
     
     PANIC_IF_GL_ERROR;
     
@@ -140,6 +148,15 @@ struct BallRender {
 class Ball;
 using BallList = std::list<Ball>;
 
+static void draw_skybox(
+    glm::mat4 view_matrix, glm::mat4 proj_matrix
+);
+
+static void draw_scene(
+    glm::mat4 view_matrix, glm::mat4 proj_matrix,
+    BallList const& list, Ball const* skip=nullptr
+);
+
 class Ball {
     glm::vec3 position;
     glm::vec3 velocity;
@@ -150,7 +167,7 @@ class Ball {
     static std::vector<BallRender> recycled_ball_render;
   public:
     Ball(glm::vec3 pos_arg, glm::vec3 vel_arg,
-         float r, float g, float b, float radius)
+         float r, float g, float b, float radius_arg)
     {
         position = pos_arg;
         velocity = vel_arg;
@@ -158,16 +175,69 @@ class Ball {
         g = g;
         b = b;
         bounced = false;
-        radius = radius;
+        radius = radius_arg;
         
         if (!recycled_ball_render.empty()) {
             render = recycled_ball_render.back();
             recycled_ball_render.pop_back();
         } else {
             PANIC_IF_GL_ERROR;
+            GLuint depth_buffers[6];
             glGenFramebuffers(6, render.framebuffers);
+            glGenRenderbuffers(6, depth_buffers);
             glGenTextures(1, &render.cubemap);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, render.cubemap);
+            
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);   
+            
             PANIC_IF_GL_ERROR;
+            
+            for (int i = 0; i < 6; ++i) {
+                glBindFramebuffer(GL_FRAMEBUFFER, render.framebuffers[i]);
+                
+                PANIC_IF_GL_ERROR;
+                
+                auto face = cubemap_face_enums[i];
+                
+                PANIC_IF_GL_ERROR;
+                glTexImage2D(
+                    face, 0, GL_RGB, ball_cubemap_dim, ball_cubemap_dim, 0,
+                    GL_RGB, GL_UNSIGNED_BYTE, 0
+                );
+                
+                PANIC_IF_GL_ERROR;
+                
+                glBindRenderbuffer(GL_RENDERBUFFER, depth_buffers[i]);
+                
+                PANIC_IF_GL_ERROR;
+                glRenderbufferStorage(
+                    GL_RENDERBUFFER, GL_DEPTH_COMPONENT,
+                    ball_cubemap_dim, ball_cubemap_dim
+                );
+                PANIC_IF_GL_ERROR;
+                glFramebufferRenderbuffer(
+                    GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                    GL_RENDERBUFFER, depth_buffers[i]
+                );
+                PANIC_IF_GL_ERROR;
+                glFramebufferTexture2D(
+                    GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                    cubemap_face_enums[i], render.cubemap, 0
+                );
+                GLenum tmp = GL_COLOR_ATTACHMENT0;
+                glDrawBuffers(1, &tmp);
+                PANIC_IF_GL_ERROR;
+/*                
+                if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                    printf("%i\n", (int)glCheckFramebufferStatus(GL_FRAMEBUFFER));
+                    panic("Apocalypse", "Framebuffer Frobnication Error");
+                }
+*/
+            }
         }
     }
     
@@ -212,27 +282,27 @@ class Ball {
     bool bounce_bounds() {
         bool flag = false;
         
-        if (position[0] > max_x && velocity[0] > 0) {
+        if (position[0] + radius > max_x && velocity[0] > 0) {
             velocity[0] *= -1.0f;
             flag = true;
         }
-        if (position[1] > max_y && velocity[1] > 0) {
+        if (position[1] + radius > max_y && velocity[1] > 0) {
             velocity[1] *= -1.0f;
             flag = true;
         }
-        if (position[2] > max_z && velocity[2] > 0) {
+        if (position[2] + radius > max_z && velocity[2] > 0) {
             velocity[2] *= -1.0f;
             flag = true;
         }
-        if (position[0] < min_x && velocity[0] < 0) {
+        if (position[0] - radius < min_x && velocity[0] < 0) {
             velocity[0] *= -1.0f;
             flag = true;
         }
-        if (position[1] < max_y && velocity[1] < 0) {
+        if (position[1] - radius < min_y && velocity[1] < 0) {
             velocity[1] *= -1.0f;
             flag = true;
         }
-        if (position[2] < max_z && velocity[2] < 0) {
+        if (position[2] - radius < min_z && velocity[2] < 0) {
             velocity[2] *= -1.0f;
             flag = true;
         }
@@ -262,7 +332,7 @@ class Ball {
         glm::mat4 view_matrix,
         glm::mat4 proj_matrix,
         BallList const& list,
-        Ball* skip=nullptr
+        Ball const* skip=nullptr
     ) {
         static bool buffers_initialized = false;
         static GLuint vertex_buffer_id;
@@ -273,7 +343,7 @@ class Ball {
         if (!buffers_initialized) {
             std::vector<glm::vec3> coord_vector;
             
-            const float magic = 3;
+            const float magic = 4;
             
             auto add_face = [&coord_vector, magic]
             (glm::vec3 a_vec, glm::vec3 b_vec, glm::vec3 face_vec) {
@@ -398,21 +468,199 @@ class Ball {
             glUniform3fv(sphere_origin_idx0, 1, &ball.position[0]);
             glUniform1f(radius_idx0, ball.radius);
             
-            printf("%i\n", (int)vertex_count);
             glDrawArrays(GL_TRIANGLES, 0, vertex_count);
         }
         
         glBindVertexArray(0);
     }
+    
+    void update_reflection_texture() {
+        glm::mat4 view_matrix, proj_matrix;
+        
+        
+    }
 };
 
 std::vector<BallRender> Ball::recycled_ball_render;
+
+static void load_cubemap_face(GLenum face, const char* filename) {
+    std::string full_filename = argv0 + "Tex/" + filename;
+    SDL_Surface* surface = SDL_LoadBMP(full_filename.c_str());
+    if (surface == nullptr) {
+        panic(SDL_GetError(), full_filename.c_str()); 
+    }
+    if (surface->w != 512 || surface->h != 512) {
+        panic("Expected 512x512 texture", full_filename.c_str());
+    }
+    if (surface->format->format != SDL_PIXELFORMAT_BGR24) {
+        fprintf(stderr, "%i\n", (int)surface->format->format);
+        panic("Expected 24-bit BGR bitmap", full_filename.c_str());
+    }
+    
+    glTexImage2D(face, 0, GL_RGB, 512, 512, 0,
+                  GL_BGR, GL_UNSIGNED_BYTE, surface->pixels);
+    
+    SDL_FreeSurface(surface);
+}
+
+static GLuint load_cubemap() {
+    GLuint id = 0;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, id);
+    
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_LOD, 0);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LOD, 8);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 0); 
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 8); 
+    
+    load_cubemap_face(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, "left.bmp");
+    load_cubemap_face(GL_TEXTURE_CUBE_MAP_POSITIVE_X, "right.bmp");
+    load_cubemap_face(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, "bottom.bmp");
+    load_cubemap_face(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, "top.bmp");
+    load_cubemap_face(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, "back.bmp");
+    load_cubemap_face(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, "front.bmp");
+    
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    
+    PANIC_IF_GL_ERROR;
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    
+    return id;
+}
+
+static const char skybox_vs_source[] =
+"#version 330\n"
+"layout(location=0) in vec3 position;\n"
+"out vec3 texture_coordinate;\n"
+"uniform mat4 view_matrix;\n"
+"uniform mat4 proj_matrix;\n"
+"void main() {\n"
+    "vec4 v = view_matrix * vec4(200*position, 0.0);\n"
+    "gl_Position = proj_matrix * vec4(v.xyz, 1);\n"
+    "texture_coordinate = position;\n"
+"}\n";
+
+static const char skybox_fs_source[] =
+"#version 330\n"
+"in vec3 texture_coordinate;\n"
+"out vec4 color;\n"
+"uniform samplerCube cubemap;\n"
+"void main() {\n"
+    "vec4 c = texture(cubemap, texture_coordinate);\n"
+    "c.a = 1.0;\n"
+    "color = c;\n"
+"}\n";
+
+static const float skybox_vertices[24] = {
+    -1, 1, 1,
+    -1, -1, 1,
+    1, -1, 1,
+    1, 1, 1,
+    -1, 1, -1,
+    -1, -1, -1,
+    1, -1, -1,
+    1, 1, -1,
+};
+
+static const GLushort skybox_elements[36] = {
+    7, 4, 5, 7, 5, 6,
+    1, 0, 3, 1, 3, 2,
+    5, 1, 2, 5, 2, 6,
+    4, 7, 3, 4, 3, 0,
+    0, 1, 5, 0, 5, 4,
+    2, 3, 7, 2, 7, 6
+};
+
+static void draw_skybox(
+    glm::mat4 view_matrix, glm::mat4 proj_matrix
+) {
+    static bool cubemap_loaded = false;
+    static GLuint cubemap_texture_id;
+    if (!cubemap_loaded) {
+        cubemap_texture_id = load_cubemap();
+        cubemap_loaded = true;
+    }
+    
+    static GLuint vao = 0;
+    static GLuint program_id;
+    static GLuint vertex_buffer_id;
+    static GLuint element_buffer_id;
+    static GLint view_matrix_id;
+    static GLint proj_matrix_id;
+    static GLint cubemap_uniform_id;
+    
+    if (vao == 0) {
+        program_id = make_program(skybox_vs_source, skybox_fs_source);
+        view_matrix_id = glGetUniformLocation(program_id, "view_matrix");
+        proj_matrix_id = glGetUniformLocation(program_id, "proj_matrix");
+        cubemap_uniform_id = glGetUniformLocation(program_id, "cubemap");
+        
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        
+        glGenBuffers(1, &vertex_buffer_id);
+        glGenBuffers(1, &element_buffer_id);
+        
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, element_buffer_id);
+        glBufferData(
+            GL_ELEMENT_ARRAY_BUFFER, sizeof skybox_elements,
+            skybox_elements, GL_STATIC_DRAW
+        );
+        
+        glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id);
+        glBufferData(
+            GL_ARRAY_BUFFER, sizeof skybox_vertices,
+            skybox_vertices, GL_STATIC_DRAW
+        ); 
+        glVertexAttribPointer(
+            0,
+            3,
+            GL_FLOAT,
+            false,
+            sizeof(float) * 3,
+            (void*)0
+        );
+        glEnableVertexAttribArray(0);
+        PANIC_IF_GL_ERROR;
+    }
+    
+    glUseProgram(program_id);
+    
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap_texture_id);
+    glUniform1i(cubemap_uniform_id, 0);
+    
+    glUniformMatrix4fv(view_matrix_id, 1, 0, &view_matrix[0][0]);
+    glUniformMatrix4fv(proj_matrix_id, 1, 0, &proj_matrix[0][0]);
+    
+    glBindVertexArray(vao);
+    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, (void*)0);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    
+    PANIC_IF_GL_ERROR;
+}
+
+static void draw_scene(
+    glm::mat4 view_matrix,
+    glm::mat4 proj_matrix,
+    BallList const& list,
+    Ball const* skip
+) {
+    draw_skybox(view_matrix, proj_matrix);
+    Ball::draw_list(view_matrix, proj_matrix, list, skip);
+}
 
 static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
     glm::mat4& view = *view_ptr;
     glm::mat4& projection = *proj_ptr;
     static bool w, a, s, d, q, e, space;
-    static float theta = 1.5707f, phi = 1.8f, radius = 2.0f;
+    static float theta = 1.5707f, phi = 1.8f;
     static float mouse_x, mouse_y;
     static glm::vec3 eye;
     
@@ -465,6 +713,9 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
         }
     }
     
+    if (phi < 0.01f) phi = 0.01f;
+    if (phi > 3.14f) phi = 3.14f;
+    
     glm::vec3 forward_normal_vector(
         sinf(phi) * cosf(theta),
         cosf(phi),
@@ -476,9 +727,9 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
     right_vector = glm::normalize(right_vector);
     auto up_vector = glm::cross(right_vector, forward_normal_vector);
     
-    eye += 5e-2f * right_vector * (float)(d - a);
-    eye += 5e-2f * forward_normal_vector * (float)(w - s);
-    eye += 5e-2f * up_vector * (float)(e - q);
+    eye += 1e-1f * right_vector * (float)(d - a);
+    eye += 1e-1f * forward_normal_vector * (float)(w - s);
+    eye += 1e-1f * up_vector * (float)(e - q);
     
     if (space) {
         theta += 1e-4 * (mouse_x - screen_x*0.5f);
@@ -486,8 +737,6 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
     }
     
     view = glm::lookAt(eye, eye+forward_normal_vector, glm::vec3(0,1,0));
-    
-    printf("%f %f %f : %f %f %f\n", eye[0], eye[1], eye[2], forward_normal_vector[0], forward_normal_vector[1], forward_normal_vector[2]);
     
     projection = glm::perspective(
         fovy_radians,
@@ -530,24 +779,34 @@ int Main(int, char** argv) {
     
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+    glEnable(GL_TEXTURE_CUBE_MAP);
     glEnable(GL_DEPTH_TEST);
     glClearColor(0, 1, 1, 1);
     
     bool no_quit = true;
-    uint32_t last_fps_print_time = 0;
     
     glm::mat4 view_matrix, proj_matrix;
     BallList list;
     
-    list.emplace_back(glm::vec3(0,0,3), glm::vec3(0,20,0), 1, 0, 1, 0.5);
-        
+    list.emplace_back(glm::vec3(3,3,3), glm::vec3(1,1,.3), 1, 0, 1, 0.5);
+    auto previous_control_update = SDL_GetTicks();
+    
     while (no_quit) {
-        no_quit = handle_controls(&view_matrix, &proj_matrix);
-        
+        auto current_tick = SDL_GetTicks();
+        if (current_tick >= previous_control_update + 16) {
+            no_quit = handle_controls(&view_matrix, &proj_matrix);
+            previous_control_update = current_tick;
+            
+            for (Ball& ball : list) {
+                ball.bounce_bounds();
+                ball.tick(0.01f);
+            }
+        }
         glViewport(0, 0, screen_x, screen_y);
         
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        draw_skybox(view_matrix, proj_matrix);
         Ball::draw_list(view_matrix, proj_matrix, list);
         
         SDL_GL_SwapWindow(window);
