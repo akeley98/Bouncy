@@ -18,8 +18,10 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include <string>
 #include <vector>
@@ -38,19 +40,20 @@ using std::swap;
 namespace {
 
 constexpr float
-    ball_radius = 0.4f,
+    ball_radius = 0.1f,
     ball_core_radius_ratio = 0.707f,
-    min_x = -12.0f,
-    max_x = +12.0f,
+    min_x = -0.8f,
+    max_x = +0.8f,
     min_y = 0.0f,
-    max_y = 1e+30f,
-    min_z = -12.0f,
-    max_z = +12.0f,
+    max_y = 2.0f,
+    min_z = -0.8f,
+    max_z = +0.8f,
     ticks_per_second = 600.0f,
     gravity = 4.0f,
-    fovy_radians = 1.0f,
-    near_plane = 0.5f,
-    far_plane = 350.0f;
+    fovy_radians = 1.4f,
+    near_plane = 0.01f,
+    far_plane = 20.0f,
+    camera_speed = 8e-2;
 
 constexpr int
     plus_x_index = 0,
@@ -59,7 +62,8 @@ constexpr int
     minus_y_index = 3,
     plus_z_index = 4,
     minus_z_index = 5,
-    ball_cubemap_dim = 256;
+    ball_cubemap_dim = 512,
+    ball_count = 25;
 
 GLenum cubemap_face_enums[] = {
     GL_TEXTURE_CUBE_MAP_POSITIVE_X,
@@ -71,6 +75,7 @@ GLenum cubemap_face_enums[] = {
 };
 
 int screen_x = 1280, screen_y = 960;
+bool paused = false;
 SDL_Window* window = nullptr;
 std::string argv0;
 
@@ -167,13 +172,13 @@ class Ball {
     static std::vector<BallRender> recycled_ball_render;
   public:
     Ball(glm::vec3 pos_arg, glm::vec3 vel_arg,
-         float r, float g, float b, float radius_arg)
+         float r_arg, float g_arg, float b_arg, float radius_arg)
     {
         position = pos_arg;
         velocity = vel_arg;
-        r = r;
-        g = g;
-        b = b;
+        r = r_arg;
+        g = g_arg;
+        b = b_arg;
         bounced = false;
         radius = radius_arg;
         
@@ -231,12 +236,11 @@ class Ball {
                 GLenum tmp = GL_COLOR_ATTACHMENT0;
                 glDrawBuffers(1, &tmp);
                 PANIC_IF_GL_ERROR;
-/*                
-                if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                
+/*                if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
                     printf("%i\n", (int)glCheckFramebufferStatus(GL_FRAMEBUFFER));
                     panic("Apocalypse", "Framebuffer Frobnication Error");
-                }
-*/
+                }*/
             }
         }
     }
@@ -284,26 +288,32 @@ class Ball {
         
         if (position[0] + radius > max_x && velocity[0] > 0) {
             velocity[0] *= -1.0f;
+            position[0] = max_x - radius;
             flag = true;
         }
         if (position[1] + radius > max_y && velocity[1] > 0) {
             velocity[1] *= -1.0f;
+            position[1] = max_y - radius;
             flag = true;
         }
         if (position[2] + radius > max_z && velocity[2] > 0) {
             velocity[2] *= -1.0f;
+            position[2] = max_z - radius;
             flag = true;
         }
         if (position[0] - radius < min_x && velocity[0] < 0) {
             velocity[0] *= -1.0f;
+            position[0] = min_x + radius;
             flag = true;
         }
         if (position[1] - radius < min_y && velocity[1] < 0) {
             velocity[1] *= -1.0f;
+            position[1] = min_y + radius;
             flag = true;
         }
         if (position[2] - radius < min_z && velocity[2] < 0) {
             velocity[2] *= -1.0f;
+            position[2] = min_z + radius;
             flag = true;
         }
         bounced |= flag;
@@ -343,7 +353,7 @@ class Ball {
         if (!buffers_initialized) {
             std::vector<glm::vec3> coord_vector;
             
-            const float magic = 4;
+            const float magic = 5;
             
             auto add_face = [&coord_vector, magic]
             (glm::vec3 a_vec, glm::vec3 b_vec, glm::vec3 face_vec) {
@@ -398,6 +408,8 @@ class Ball {
         static GLint color_idx0;
         static GLint sphere_origin_idx0;
         static GLint radius_idx0;
+        static GLint reflection_cubemap_idx0;
+        static GLint eye_idx0;
         static GLint sphere_coord_idx0 = 0;
         
         static const char vs0_source[] =
@@ -408,23 +420,30 @@ class Ball {
             "uniform vec3 color;\n"
             "uniform float radius;\n"
             "uniform vec3 sphere_origin;\n"
+            "uniform vec3 eye;\n"
             
             "layout(location=0) in vec3 sphere_coord;\n"
             
-            "out vec4 varying_color;\n"
-            
+            "out vec3 surface_color;\n"
+            "out vec3 reflected_vector;\n"
             "void main() {\n"
                 "vec4 coord = vec4(radius*sphere_coord + sphere_origin, 1.0);\n"
                 "gl_Position = proj_matrix * view_matrix * coord;\n"
-                "varying_color = vec4(color, 1.0);\n"
+                "surface_color = color;\n"
+                "reflected_vector = reflect(coord.xyz - eye, sphere_coord);\n"
             "}\n"
         ;
         static const char fs0_source[] =
             "#version 330\n"
             "precision mediump float;\n"
-            "in vec4 varying_color;\n"
+            "uniform samplerCube reflection_cubemap;\n"
+            "in vec3 reflected_vector;\n"
+            "in vec3 surface_color;\n"
             "layout(location=0) out vec4 fragment_color;\n"
-            "void main() { fragment_color = varying_color; }\n"
+            "void main() { \n"
+                "vec3 c = 0.2*surface_color + 0.8*texture(reflection_cubemap,reflected_vector).rgb;\n"
+                "fragment_color = vec4(c,1.0);\n"
+            "}\n"
         ;
         if (!initialized0) {
             PANIC_IF_GL_ERROR;
@@ -439,6 +458,10 @@ class Ball {
             color_idx0 = glGetUniformLocation(program0_id, "color");
             sphere_origin_idx0 = glGetUniformLocation(program0_id, "sphere_origin");
             radius_idx0 = glGetUniformLocation(program0_id, "radius");
+            eye_idx0 = glGetUniformLocation(program0_id, "eye");
+            reflection_cubemap_idx0 = glGetUniformLocation(
+                program0_id, "reflection_cubemap"
+            );
             
             glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id);
             
@@ -461,23 +484,144 @@ class Ball {
         
         glUniformMatrix4fv(view_matrix_idx0, 1, false, &view_matrix[0][0]);
         glUniformMatrix4fv(proj_matrix_idx0, 1, false, &proj_matrix[0][0]);
+        glm::vec3 eye = inverse(view_matrix) * glm::vec4(0,0,0,1);
+        glUniform3fv(eye_idx0, 1, &eye[0]);
         
         for (Ball const& ball : list) {
             if (&ball == skip) continue;
+            
             glUniform3f(color_idx0, ball.r, ball.g, ball.b);
             glUniform3fv(sphere_origin_idx0, 1, &ball.position[0]);
-            glUniform1f(radius_idx0, ball.radius);
+            glUniform1f(radius_idx0, ball.radius * ball_core_radius_ratio);
+            
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, ball.render.cubemap);
+            glUniform1i(reflection_cubemap_idx0, 0);
             
             glDrawArrays(GL_TRIANGLES, 0, vertex_count);
         }
         
+        static bool initialized1 = false;
+        static GLuint vao1;
+        static GLuint program1_id;
+        
+        static GLint view_matrix_idx1;
+        static GLint proj_matrix_idx1;
+        static GLint sphere_origin_idx1;
+        static GLint radius_idx1;
+        static GLint sphere_coord_idx1 = 0;
+        
+        static const char vs1_source[] =
+            "#version 330\n"
+            "precision mediump float;\n"
+            "uniform mat4 view_matrix;\n"
+            "uniform mat4 proj_matrix;\n"
+            "uniform vec3 sphere_origin;\n"
+            "uniform float radius;\n"
+            
+            "layout(location=0) in vec3 sphere_coord;\n"
+            "out vec3 varying_coord;\n"
+            
+            "void main() { \n"
+                "vec4 coord = vec4(radius*sphere_coord + sphere_origin, 1.0);\n"
+                "gl_Position = proj_matrix * view_matrix * coord;\n"
+                "varying_coord=sphere_coord;\n"
+            "}\n"
+        ;
+        static const char fs1_source[] =
+            "#version 330\n"
+            "precision mediump float;\n"
+            "in vec3 varying_coord;\n"
+            "out vec4 frag_color;\n"
+            "uniform mat4 view_matrix;\n"
+            "void main() { \n"
+                "float z = abs(normalize(view_matrix * vec4(varying_coord, 0))).z;\n"
+                "float f = z*z * 0.6;\n"
+                "frag_color = vec4(f,f,f,0.4-z*0.2);\n"
+            "}\n"
+        ;
+        
+        if (!initialized1) {
+            PANIC_IF_GL_ERROR;
+            program1_id = make_program(vs1_source, fs1_source);
+            
+            PANIC_IF_GL_ERROR;
+            glGenVertexArrays(1, &vao1);
+            glBindVertexArray(vao1);
+            
+            view_matrix_idx1 = glGetUniformLocation(program1_id, "view_matrix");
+            proj_matrix_idx1 = glGetUniformLocation(program1_id, "proj_matrix");
+            sphere_origin_idx1 = glGetUniformLocation(
+                program1_id, "sphere_origin");
+            radius_idx1 = glGetUniformLocation(program1_id, "radius");
+            
+            glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id);
+            glVertexAttribPointer(
+                sphere_coord_idx1,
+                3,
+                GL_FLOAT,
+                false,
+                3*sizeof(float),
+                (void*)0
+            );
+            glEnableVertexAttribArray(sphere_coord_idx1);
+            PANIC_IF_GL_ERROR;
+            
+            initialized1 = true;
+        }
+        
+        glUseProgram(program1_id);
+        glBindVertexArray(vao1);
+        
+        glUniformMatrix4fv(view_matrix_idx1, 1, false, &view_matrix[0][0]);
+        glUniformMatrix4fv(proj_matrix_idx1, 1, false, &proj_matrix[0][0]);
+        
+        glDepthMask(GL_FALSE);
+        
+        for (Ball const& ball : list) {
+            if (&ball == skip) continue;
+            
+            glUniform3fv(sphere_origin_idx1, 1, &ball.position[0]);
+            glUniform1f(radius_idx1, ball.radius);
+            
+            glDrawArrays(GL_TRIANGLES, 0, vertex_count);
+        }
+        glDepthMask(GL_TRUE);
         glBindVertexArray(0);
     }
     
-    void update_reflection_texture() {
-        glm::mat4 view_matrix, proj_matrix;
+    void update_reflection_texture(BallList const& list) {
+        glm::mat4 view_matrix;
+        glm::mat4 proj_matrix = glm::perspective(
+            1.5707963267948966f, 1.0f, radius*0.1f, far_plane
+        );
+        glm::vec3 const& v = position;
         
+        glViewport(0, 0, ball_cubemap_dim, ball_cubemap_dim);
         
+        glBindFramebuffer(GL_FRAMEBUFFER, render.framebuffers[plus_x_index]);
+        view_matrix = glm::lookAt(v, v+glm::vec3(1,0,0), glm::vec3(0,-1,0));
+        draw_scene(view_matrix, proj_matrix, list, this);
+        
+        glBindFramebuffer(GL_FRAMEBUFFER, render.framebuffers[minus_x_index]);
+        view_matrix = glm::lookAt(v, v+glm::vec3(-1,0,0), glm::vec3(0,-1,0));
+        draw_scene(view_matrix, proj_matrix, list, this);
+        
+        glBindFramebuffer(GL_FRAMEBUFFER, render.framebuffers[plus_y_index]);
+            view_matrix = glm::lookAt(v, v+glm::vec3(0,1,0), glm::vec3(0,0,1));
+        draw_scene(view_matrix, proj_matrix, list, this);
+        
+        glBindFramebuffer(GL_FRAMEBUFFER, render.framebuffers[minus_y_index]);
+        view_matrix = glm::lookAt(v, v+glm::vec3(0,-1,0), glm::vec3(0,0,-1));
+        draw_scene(view_matrix, proj_matrix, list, this);
+        
+        glBindFramebuffer(GL_FRAMEBUFFER, render.framebuffers[plus_z_index]);
+        view_matrix = glm::lookAt(v, v+glm::vec3(0,0,1), glm::vec3(0,-1,0));
+        draw_scene(view_matrix, proj_matrix, list, this);
+        
+        glBindFramebuffer(GL_FRAMEBUFFER, render.framebuffers[minus_z_index]);
+        view_matrix = glm::lookAt(v, v+glm::vec3(0,0,-1), glm::vec3(0,-1,0));
+        draw_scene(view_matrix, proj_matrix, list, this);
     }
 };
 
@@ -540,7 +684,7 @@ static const char skybox_vs_source[] =
 "uniform mat4 view_matrix;\n"
 "uniform mat4 proj_matrix;\n"
 "void main() {\n"
-    "vec4 v = view_matrix * vec4(200*position, 0.0);\n"
+    "vec4 v = view_matrix * vec4(10*position, 0.0);\n"
     "gl_Position = proj_matrix * vec4(v.xyz, 1);\n"
     "texture_coordinate = position;\n"
 "}\n";
@@ -652,6 +796,7 @@ static void draw_scene(
     BallList const& list,
     Ball const* skip
 ) {
+    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
     draw_skybox(view_matrix, proj_matrix);
     Ball::draw_list(view_matrix, proj_matrix, list, skip);
 }
@@ -659,10 +804,10 @@ static void draw_scene(
 static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
     glm::mat4& view = *view_ptr;
     glm::mat4& projection = *proj_ptr;
-    static bool w, a, s, d, q, e, space;
+    static bool w, a, s, d, q, e, space, shift;
     static float theta = 1.5707f, phi = 1.8f;
     static float mouse_x, mouse_y;
-    static glm::vec3 eye;
+    static glm::vec3 eye(0, 0, 2*min_z);
     
     bool no_quit = true;
     SDL_Event event;
@@ -679,6 +824,9 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
               break; case SDL_SCANCODE_Q: case SDL_SCANCODE_U: q = true;
               break; case SDL_SCANCODE_E: case SDL_SCANCODE_O: e = true;
               break; case SDL_SCANCODE_SPACE:  space = true;
+              break; case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT:
+                shift = true;
+              break; case SDL_SCANCODE_TAB: paused = !paused;
               }
             
           break; case SDL_KEYUP:
@@ -690,6 +838,8 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
               break; case SDL_SCANCODE_D: case SDL_SCANCODE_L: d = false;
               break; case SDL_SCANCODE_Q: case SDL_SCANCODE_U: q = false;
               break; case SDL_SCANCODE_E: case SDL_SCANCODE_O: e = false;
+              break; case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT:
+                shift = false;
               break; case SDL_SCANCODE_SPACE: space = false;
             }
           break; case SDL_MOUSEWHEEL:
@@ -727,9 +877,10 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
     right_vector = glm::normalize(right_vector);
     auto up_vector = glm::cross(right_vector, forward_normal_vector);
     
-    eye += 1e-1f * right_vector * (float)(d - a);
-    eye += 1e-1f * forward_normal_vector * (float)(w - s);
-    eye += 1e-1f * up_vector * (float)(e - q);
+    float V = shift ? camera_speed * 0.2f : camera_speed;
+    eye += V * right_vector * (float)(d - a);
+    eye += V * forward_normal_vector * (float)(w - s);
+    eye += V * up_vector * (float)(e - q);
     
     if (space) {
         theta += 1e-4 * (mouse_x - screen_x*0.5f);
@@ -781,6 +932,7 @@ int Main(int, char** argv) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_TEXTURE_CUBE_MAP);
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
     glClearColor(0, 1, 1, 1);
     
     bool no_quit = true;
@@ -788,27 +940,70 @@ int Main(int, char** argv) {
     glm::mat4 view_matrix, proj_matrix;
     BallList list;
     
-    list.emplace_back(glm::vec3(3,3,3), glm::vec3(1,1,.3), 1, 0, 1, 0.5);
-    auto previous_control_update = SDL_GetTicks();
+    srandom(static_cast<unsigned int>(time(nullptr)));
+    auto rnd = [](float min, float max) {
+        float result = uint16_t(random()) * ((max-min)/65535.f) + min;
+        return result;
+    };
+    
+    for (int i = 0; i < ball_count; ++i) {
+        list.emplace_back(
+            glm::vec3(rnd(min_x, max_x), rnd(min_y, max_y), rnd(min_z, max_z)),
+            glm::vec3(rnd(-3, 3), rnd(-3, 3), rnd(-3, 3)),
+            rnd(0, 1), rnd(0, 1), rnd(0, 1), ball_radius
+        );
+    }
+    
+    auto previous_update = SDL_GetTicks();
+    auto previous_fps_print = SDL_GetTicks();
+    int frames = 0;
     
     while (no_quit) {
         auto current_tick = SDL_GetTicks();
-        if (current_tick >= previous_control_update + 16) {
+        if (current_tick >= previous_update + 16) {
             no_quit = handle_controls(&view_matrix, &proj_matrix);
-            previous_control_update = current_tick;
+            previous_update += 16;
+            if (current_tick - previous_update > 100) {
+                previous_update = current_tick;
+            }
             
-            for (Ball& ball : list) {
-                ball.bounce_bounds();
-                ball.tick(0.01f);
+            if (!paused) {
+                for (Ball& ball : list) {
+                    ball.reset_bounce_flag();
+                }
+                
+                for (Ball& ball : list) {
+                    ball.bounce_bounds();
+                    ball.tick(0.01f);
+                }
+                
+                for (Ball& ball : list) {
+                    for (Ball& other : list) {
+                        if (&ball != &other
+                            && !ball.bounce_flag()
+                            && !other.bounce_flag()
+                        ) {
+                            ball.bounce_ball(&other);
+                        }
+                    }
+                }
+            }
+            ++frames;
+            if (current_tick >= previous_fps_print + 2000) {
+                float fps = 1000.0 * frames / (current_tick-previous_fps_print);
+                printf("%4.1f FPS\n", fps);
+                previous_fps_print = current_tick;
+                frames = 0;
             }
         }
-        glViewport(0, 0, screen_x, screen_y);
         
-        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        for (Ball& ball : list) {
+            ball.update_reflection_texture(list);
+        }
+        
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        draw_skybox(view_matrix, proj_matrix);
-        Ball::draw_list(view_matrix, proj_matrix, list);
-        
+        glViewport(0, 0, screen_x, screen_y);
+        draw_scene(view_matrix, proj_matrix, list);
         SDL_GL_SwapWindow(window);
         PANIC_IF_GL_ERROR;
     }
