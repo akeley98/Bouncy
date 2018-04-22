@@ -63,7 +63,7 @@ constexpr int
     plus_z_index = 4,
     minus_z_index = 5,
     ball_cubemap_dim = 512,
-    ball_count = 25;
+    ball_count = 21;
 
 GLenum cubemap_face_enums[] = {
     GL_TEXTURE_CUBE_MAP_POSITIVE_X,
@@ -500,6 +500,103 @@ class Ball {
             
             glDrawArrays(GL_TRIANGLES, 0, vertex_count);
         }
+        
+        static bool initialized2 = false;
+        static GLuint vao2;
+        static GLuint program2_id;
+        
+        static GLint view_matrix_idx2;
+        static GLint proj_matrix_idx2;
+        static GLint sphere_origin_idx2;
+        static GLint radius_idx2;
+        static GLint eye_idx2;
+        static GLint refract_cubemap_idx2;
+        static GLint sphere_coord_idx2 = 0;
+        
+        static const char vs2_source[] =
+            "#version 330\n"
+            "precision mediump float;\n"
+            "uniform mat4 view_matrix;\n"
+            "uniform mat4 proj_matrix;\n"
+            "uniform vec3 sphere_origin;\n"
+            "uniform float radius;\n"
+            "uniform vec3 eye;\n"
+            
+            "layout(location=0) in vec3 sphere_coord;\n"
+            "out vec3 refract_vector;\n"
+            
+            "void main() { \n"
+                "vec3 world_coord = radius*sphere_coord + sphere_origin;\n"
+                "vec3 incident = world_coord - eye;\n"
+                "vec3 normal = -sphere_coord;\n"
+                "refract_vector = refract(incident, normal, 0.7);\n"
+                "gl_Position = proj_matrix*view_matrix*vec4(world_coord, 1);\n"
+            "} \n"
+        ;
+        
+        static const char fs2_source[] =
+            "#version 330\n"
+            "precision mediump float;\n"
+            "uniform samplerCube refract_cubemap;\n"
+            
+            "in vec3 refract_vector;\n"
+            "out vec4 frag_color;\n"
+            
+            "void main() { \n"
+                "frag_color = texture(refract_cubemap, refract_vector);\n"
+            "} \n"
+        ;
+        
+        if (!initialized2) {
+            PANIC_IF_GL_ERROR;
+            program2_id = make_program(vs2_source, fs2_source);
+            glGenVertexArrays(1, &vao2);
+            glBindVertexArray(vao2);
+            
+            view_matrix_idx2 = glGetUniformLocation(program2_id, "view_matrix");
+            proj_matrix_idx2 = glGetUniformLocation(program2_id, "proj_matrix");
+            sphere_origin_idx2 = glGetUniformLocation(
+                program2_id, "sphere_origin");
+            radius_idx2 = glGetUniformLocation(program2_id, "radius");
+            refract_cubemap_idx2 = glGetUniformLocation(
+                program2_id, "refract_cubemap");
+            
+            glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id);
+            glVertexAttribPointer(
+                sphere_coord_idx2,
+                3,
+                GL_FLOAT,
+                false,
+                3*sizeof(float),
+                (void*)0
+            );
+            glEnableVertexAttribArray(sphere_coord_idx2);
+            PANIC_IF_GL_ERROR;
+            
+            initialized2 = true;
+        }
+        
+        glCullFace(GL_FRONT);
+        glUseProgram(program2_id);
+        glBindVertexArray(vao2);
+        
+        glUniformMatrix4fv(view_matrix_idx2, 1, false, &view_matrix[0][0]);
+        glUniformMatrix4fv(proj_matrix_idx2, 1, false, &proj_matrix[0][0]);
+        glUniform3fv(eye_idx2, 1, &eye[0]);
+        
+        for (Ball const& ball : list) {
+            if (&ball == skip) continue;
+            
+            glUniform3fv(sphere_origin_idx2, 1, &ball.position[0]);
+            glUniform1f(radius_idx2, ball.radius);
+            
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, ball.render.cubemap);
+            glUniform1i(refract_cubemap_idx2, 0);
+            
+            glDrawArrays(GL_TRIANGLES, 0, vertex_count);
+        }
+        glCullFace(GL_BACK);
         
         static bool initialized1 = false;
         static GLuint vao1;
@@ -959,7 +1056,7 @@ int Main(int, char** argv) {
     for (int i = 0; i < ball_count; ++i) {
         list.emplace_back(
             glm::vec3(rnd(min_x, max_x), rnd(min_y, max_y), rnd(min_z, max_z)),
-            glm::vec3(rnd(-3, 3), rnd(-3, 3), rnd(-3, 3)),
+            glm::vec3(rnd(-3, 3), rnd(1, 4.5), rnd(-3, 3)),
             rnd(0, 1), rnd(0, 1), rnd(0, 1), ball_radius
         );
     }
