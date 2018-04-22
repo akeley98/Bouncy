@@ -509,6 +509,7 @@ class Ball {
         static GLint proj_matrix_idx1;
         static GLint sphere_origin_idx1;
         static GLint radius_idx1;
+        static GLint eye_idx1;
         static GLint sphere_coord_idx1 = 0;
         
         static const char vs1_source[] =
@@ -520,24 +521,30 @@ class Ball {
             "uniform float radius;\n"
             
             "layout(location=0) in vec3 sphere_coord;\n"
-            "out vec3 varying_coord;\n"
+            "out vec3 varying_normal;\n"
+            "out vec3 varying_pos;\n"
             
             "void main() { \n"
-                "vec4 coord = vec4(radius*sphere_coord + sphere_origin, 1.0);\n"
+                "vec3 coord3 = radius*sphere_coord + sphere_origin;\n"
+                "vec4 coord = vec4(coord3, 1.0);\n"
                 "gl_Position = proj_matrix * view_matrix * coord;\n"
-                "varying_coord=sphere_coord;\n"
+                "varying_normal = sphere_coord;\n"
+                "varying_pos = coord3;\n"
             "}\n"
         ;
         static const char fs1_source[] =
             "#version 330\n"
             "precision mediump float;\n"
-            "in vec3 varying_coord;\n"
+            "in vec3 varying_normal;\n"
+            "in vec3 varying_pos;\n"
             "out vec4 frag_color;\n"
             "uniform mat4 view_matrix;\n"
+            "uniform vec3 eye;\n"
             "void main() { \n"
-                "float z = abs(normalize(view_matrix * vec4(varying_coord, 0))).z;\n"
-                "float f = z*z * 0.6;\n"
-                "frag_color = vec4(f,f,f,0.4-z*0.2);\n"
+                "float Dot = dot(normalize(eye-varying_pos),\n"
+                                "normalize(varying_normal));\n"
+                "float f = Dot*Dot*0.6;\n"
+                "frag_color = vec4(f,f,f,0.4-Dot*0.15);\n"
             "}\n"
         ;
         
@@ -554,6 +561,7 @@ class Ball {
             sphere_origin_idx1 = glGetUniformLocation(
                 program1_id, "sphere_origin");
             radius_idx1 = glGetUniformLocation(program1_id, "radius");
+            eye_idx1 = glGetUniformLocation(program1_id, "eye");
             
             glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id);
             glVertexAttribPointer(
@@ -575,6 +583,7 @@ class Ball {
         
         glUniformMatrix4fv(view_matrix_idx1, 1, false, &view_matrix[0][0]);
         glUniformMatrix4fv(proj_matrix_idx1, 1, false, &proj_matrix[0][0]);
+        glUniform3fv(eye_idx1, 1, &eye[0]);
         
         glDepthMask(GL_FALSE);
         
