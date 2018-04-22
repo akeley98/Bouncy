@@ -75,7 +75,7 @@ GLenum cubemap_face_enums[] = {
 };
 
 int screen_x = 1280, screen_y = 960;
-bool paused = false;
+bool paused = false, do_one_tick = false;
 SDL_Window* window = nullptr;
 std::string argv0;
 
@@ -836,6 +836,7 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
               break; case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT:
                 shift = true;
               break; case SDL_SCANCODE_TAB: paused = !paused;
+              break; case SDL_SCANCODE_RETURN: do_one_tick = true;
               }
             
           break; case SDL_KEYUP:
@@ -976,7 +977,8 @@ int Main(int, char** argv) {
                 previous_update = current_tick;
             }
             
-            if (!paused) {
+            if (!paused || do_one_tick) {
+                do_one_tick = false;
                 for (Ball& ball : list) {
                     ball.reset_bounce_flag();
                 }
