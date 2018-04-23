@@ -50,7 +50,7 @@ constexpr float
     max_z = +0.8f,
     ticks_per_second = 600.0f,
     gravity = 4.0f,
-    fovy_radians = 1.4f,
+    fovy_radians = 1.0f,
     near_plane = 0.01f,
     far_plane = 20.0f,
     camera_speed = 8e-2;
@@ -527,9 +527,9 @@ class Ball {
             
             "void main() { \n"
                 "vec3 world_coord = radius*sphere_coord + sphere_origin;\n"
-                "vec3 incident = world_coord - eye;\n"
+                "vec3 incident = normalize(world_coord - eye);\n"
                 "vec3 normal = -sphere_coord;\n"
-                "refract_vector = refract(incident, normal, 0.7);\n"
+                "refract_vector = refract(incident, normal, 0.64);\n"
                 "gl_Position = proj_matrix*view_matrix*vec4(world_coord, 1);\n"
             "} \n"
         ;
@@ -1057,7 +1057,7 @@ int Main(int, char** argv) {
         list.emplace_back(
             glm::vec3(rnd(min_x, max_x), rnd(min_y, max_y), rnd(min_z, max_z)),
             glm::vec3(rnd(-3, 3), rnd(1, 4.5), rnd(-3, 3)),
-            rnd(0, 1), rnd(0, 1), rnd(0, 1), ball_radius
+            rnd(-.4, 1.4), rnd(-.4, 1.4), rnd(-.4, 1.4), ball_radius
         );
     }
     
@@ -1077,14 +1077,11 @@ int Main(int, char** argv) {
             if (!paused || do_one_tick) {
                 do_one_tick = false;
                 for (Ball& ball : list) {
-                    ball.reset_bounce_flag();
-                }
-                
-                for (Ball& ball : list) {
                     ball.bounce_bounds();
                     ball.tick(0.01f);
+                    ball.reset_bounce_flag();
                 }
-                
+                                
                 for (Ball& ball : list) {
                     for (Ball& other : list) {
                         if (&ball != &other
