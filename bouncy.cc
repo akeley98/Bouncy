@@ -48,12 +48,12 @@ constexpr float
     max_y = 2.0f,
     min_z = -0.8f,
     max_z = +0.8f,
-    ticks_per_second = 600.0f,
-    gravity = 4.0f,
+    gravity = 0.0f,
     fovy_radians = 1.0f,
     near_plane = 0.01f,
     far_plane = 20.0f,
-    camera_speed = 8e-2;
+    camera_speed = 8e-2,
+    base_tick_dt = 0.001f;
 
 constexpr int
     plus_x_index = 0,
@@ -63,7 +63,8 @@ constexpr int
     plus_z_index = 4,
     minus_z_index = 5,
     ball_cubemap_dim = 512,
-    ball_count = 21;
+    ball_count = 18,
+    ticks_per_frame = 20;
 
 GLenum cubemap_face_enums[] = {
     GL_TEXTURE_CUBE_MAP_POSITIVE_X,
@@ -76,6 +77,7 @@ GLenum cubemap_face_enums[] = {
 
 int screen_x = 1280, screen_y = 960;
 bool paused = false, do_one_tick = false;
+float tick_dt = 0.005f;
 SDL_Window* window = nullptr;
 std::string argv0;
 
@@ -441,7 +443,8 @@ class Ball {
             "in vec3 surface_color;\n"
             "layout(location=0) out vec4 fragment_color;\n"
             "void main() { \n"
-                "vec3 c = 0.2*surface_color + 0.8*texture(reflection_cubemap,reflected_vector).rgb;\n"
+                "vec3 c = 0.25*surface_color\n"
+                "       + 0.75*texture(reflection_cubemap,reflected_vector).rgb;\n"
                 "fragment_color = vec4(c,1.0);\n"
             "}\n"
         ;
@@ -558,6 +561,7 @@ class Ball {
             sphere_origin_idx2 = glGetUniformLocation(
                 program2_id, "sphere_origin");
             radius_idx2 = glGetUniformLocation(program2_id, "radius");
+            eye_idx2 = glGetUniformLocation(program2_id, "eye");
             refract_cubemap_idx2 = glGetUniformLocation(
                 program2_id, "refract_cubemap");
             
@@ -583,6 +587,7 @@ class Ball {
         glUniformMatrix4fv(view_matrix_idx2, 1, false, &view_matrix[0][0]);
         glUniformMatrix4fv(proj_matrix_idx2, 1, false, &proj_matrix[0][0]);
         glUniform3fv(eye_idx2, 1, &eye[0]);
+        PANIC_IF_GL_ERROR;
         
         for (Ball const& ball : list) {
             if (&ball == skip) continue;
@@ -595,6 +600,7 @@ class Ball {
             glUniform1i(refract_cubemap_idx2, 0);
             
             glDrawArrays(GL_TRIANGLES, 0, vertex_count);
+            PANIC_IF_GL_ERROR;
         }
         glCullFace(GL_BACK);
         
@@ -934,7 +940,13 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
                 shift = true;
               break; case SDL_SCANCODE_TAB: paused = !paused;
               break; case SDL_SCANCODE_RETURN: do_one_tick = true;
-              }
+              break; case SDL_SCANCODE_0: tick_dt = base_tick_dt * 10;
+              break; case SDL_SCANCODE_1: case SDL_SCANCODE_2: case SDL_SCANCODE_3:
+                     case SDL_SCANCODE_4: case SDL_SCANCODE_5: case SDL_SCANCODE_6:
+                     case SDL_SCANCODE_7: case SDL_SCANCODE_8: case SDL_SCANCODE_9:
+                tick_dt = base_tick_dt * 
+                          (event.key.keysym.scancode + 1 - SDL_SCANCODE_1);
+            }
             
           break; case SDL_KEYUP:
             switch (event.key.keysym.scancode) {
@@ -950,8 +962,8 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
               break; case SDL_SCANCODE_SPACE: space = false;
             }
           break; case SDL_MOUSEWHEEL:
-            phi -= event.wheel.y * 0.04f;
-            theta -= event.wheel.x * 0.04f;
+            phi -= event.wheel.y * 2e-2f;
+            theta -= event.wheel.x * 2e-2f;
           break; case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
             mouse_x = event.button.x;
             mouse_y = event.button.y;
@@ -961,9 +973,8 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
           break; case SDL_WINDOWEVENT:
             if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
                 event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                
-                screen_x = event.window.data1;
-                screen_y = event.window.data2;
+                    screen_x = event.window.data1;
+                    screen_y = event.window.data2;
             }
           break; case SDL_QUIT:
             no_quit = false;
@@ -990,8 +1001,8 @@ static bool handle_controls(glm::mat4* view_ptr, glm::mat4* proj_ptr) {
     eye += V * up_vector * (float)(e - q);
     
     if (space) {
-        theta += 1e-4 * (mouse_x - screen_x*0.5f);
-        phi +=   1e-4 * (mouse_y - screen_y*0.5f);
+        theta += 8e-2 * (mouse_x - screen_x*0.5f) / screen_y;
+        phi +=   8e-2 * (mouse_y - screen_y*0.5f) / screen_y;
     }
     
     view = glm::lookAt(eye, eye+forward_normal_vector, glm::vec3(0,1,0));
@@ -1025,6 +1036,9 @@ int Main(int, char** argv) {
     if (window == nullptr) {
         panic("Could not initialize window", SDL_GetError());
     }
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    
     auto context = SDL_GL_CreateContext(window);
     if (context == nullptr) {
         panic("Could not create OpenGL context", SDL_GetError());
@@ -1037,10 +1051,10 @@ int Main(int, char** argv) {
     
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_TEXTURE_CUBE_MAP);
+    glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
-    glClearColor(0, 1, 1, 1);
+    glClearColor(0.4, 0.4, 0.4, 1);
     
     bool no_quit = true;
     
@@ -1057,7 +1071,10 @@ int Main(int, char** argv) {
         list.emplace_back(
             glm::vec3(rnd(min_x, max_x), rnd(min_y, max_y), rnd(min_z, max_z)),
             glm::vec3(rnd(-3, 3), rnd(1, 4.5), rnd(-3, 3)),
-            rnd(-.4, 1.4), rnd(-.4, 1.4), rnd(-.4, 1.4), ball_radius
+            std::min(1.0f, std::max(0.0f, rnd(-1.5f, 2.5f))),
+            std::min(1.0f, std::max(0.0f, rnd(-1.5f, 2.5f))),
+            std::min(1.0f, std::max(0.0f, rnd(-1.5f, 2.5f))),
+            ball_radius
         );
     }
     
@@ -1078,7 +1095,9 @@ int Main(int, char** argv) {
                 do_one_tick = false;
                 for (Ball& ball : list) {
                     ball.bounce_bounds();
-                    ball.tick(0.01f);
+                    for (int i = 0; i < ticks_per_frame; ++i) {
+                        ball.tick(tick_dt / ticks_per_frame);
+                    }
                     ball.reset_bounce_flag();
                 }
                                 
